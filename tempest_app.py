@@ -1,6 +1,6 @@
 """
 Tempest 1D -- Streamlit Application
-Estimates vertical hyporheic specific discharge from temperature time series
+Estimates vertical subsurface hydraulic specific discharge from temperature time series
 using an Extended Kalman Filter (EKF) + Rauch-Tung-Striebel (RTS) smoother.
 
 Usage:
@@ -288,7 +288,7 @@ def run_model(vtp_df, station_str, tBC, bBC, obs_depths,
 #  UI
 # ==============================================================================
 
-st.title("Tempest 1D -- Hyporheic Flux Estimator")
+st.title("Tempest 1D -- Vertical Saturated Flux Estimator")
 st.caption(
     "Vertical Temperature Profile (VTP) method  |  "
     "Extended Kalman Filter + Rauch-Tung-Striebel Smoother"
