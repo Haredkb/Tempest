@@ -106,7 +106,7 @@ from tempest1d import EKF, ModelProperties, run_EKF, run_RTS
 
 st.set_page_config(
     page_title="Tempest 1D",
-    page_icon="🌊",
+    page_icon="magic.png",
     layout="wide",
     initial_sidebar_state="expanded",
 )
