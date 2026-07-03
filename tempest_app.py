@@ -333,6 +333,7 @@ if param_mode == "Upload parameter CSV":
         st.error("Could not parse parameter file: " + str(exc))
         st.stop()
 
+vtp_df = None
 try:
     vtp_df = pd.read_csv(data_file, parse_dates=["timestamp"])
 except Exception:
@@ -343,6 +344,10 @@ except Exception:
     except Exception as exc:
         st.error("Could not parse VTP data file: " + str(exc))
         st.stop()
+
+if vtp_df is None:
+    st.error("VTP data file could not be loaded.")
+    st.stop()
 
 st.markdown("---")
 st.subheader("3 - Review parameters")
