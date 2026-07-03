@@ -130,9 +130,7 @@ def parse_param_csv(df):
     params["obsD"]        = safe_float(row.iloc[5])
     params["Kt"]          = safe_float(row.iloc[6], 2.9288)
     params["Cwater"]      = safe_float(row.iloc[7], 4.18e6)
-    params["Csed"]        = safe_float(row.iloc[8])
-    params["phi"]         = safe_float(row.iloc[9])
-    params["Csat_input"]  = safe_float(row.iloc[10])
+    params["Csat"]        = safe_float(row.iloc[10])
     vq_raw = row.iloc[11]
     params["vq_mday2"] = (
         None
@@ -140,14 +138,6 @@ def parse_param_csv(df):
         else safe_float(vq_raw)
     )
     return params
-
-
-def compute_csat(Cwater, Csed, phi, Csat_input):
-    if (Csed is not None) and (phi is not None):
-        return phi * Cwater + (1.0 - phi) * Csed
-    if Csat_input is not None:
-        return Csat_input
-    return 3.5e6
 
 
 def default_params():
@@ -158,9 +148,7 @@ def default_params():
         "obsD": 0.07,
         "Kt": 2.9288,
         "Cwater": 4.18e6,
-        "Csed": 2.65e6,
-        "phi": 0.35,
-        "Csat_input": None,
+        "Csat": 3.5e6,
         "vq_mday2": None,
     }
 
@@ -360,10 +348,6 @@ st.markdown("---")
 st.subheader("3 - Review parameters")
 st.caption("Values parsed from your parameter file -- adjust as needed before running.")
 
-csat_computed = compute_csat(
-    params["Cwater"], params["Csed"], params["phi"], params["Csat_input"]
-)
-
 with st.expander("Edit parameters", expanded=True):
     col1, col2, col3 = st.columns(3)
 
@@ -405,30 +389,12 @@ with st.expander("Edit parameters", expanded=True):
             value=float(params["Cwater"]) if params["Cwater"] is not None else 4.18e6,
             min_value=0.0, format="%.4e",
         )
-        Csed = st.number_input(
-            "Csed (J/m3/C)",
-            value=float(params["Csed"]) if params["Csed"] is not None else 2.65e6,
-            min_value=0.0, format="%.4e",
-        )
-        phi = st.number_input(
-            "Porosity phi",
-            value=float(params["phi"]) if params["phi"] is not None else 0.35,
-            min_value=0.0, max_value=1.0, format="%.3f",
-        )
-        csat_computed = compute_csat(Cwater, Csed, phi, params["Csat_input"])
         Csat = st.number_input(
             "Csat (J/m3/C)",
-            value=float(csat_computed),
+            value=float(params["Csat"]) if params["Csat"] is not None else 3.5e6,
             min_value=0.0, format="%.4e",
-            help=(
-                "Bulk heat capacity of saturated sediment. "
-                "Auto-computed from Csed + phi when both are present."
-            )
+            help="Bulk heat capacity of saturated sediment.",
         )
-        if params["Csed"] is not None and params["phi"] is not None:
-            st.caption(
-                "Computed: phi*Cw + (1-phi)*Csed = {:.4e}".format(csat_computed)
-            )
 
     with col3:
         st.markdown("**Filter settings**")
