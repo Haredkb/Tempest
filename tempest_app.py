@@ -515,7 +515,7 @@ if bad_obs:
     st.stop()
 
 with st.expander("Preview VTP data", expanded=False):
-    st.dataframe(vtp_df.head(10), use_container_width=True)
+    st.dataframe(vtp_df.head(10), width="stretch")
     st.caption(
         "{:,} rows  |  {} columns  |  {} to {}".format(
             len(vtp_df), len(vtp_df.columns),
@@ -552,7 +552,7 @@ if plot_cols:
         legend_title="Sensor",
         margin={"l": 20, "r": 20, "t": 20, "b": 20},
     )
-    st.plotly_chart(fig_raw, use_container_width=True)
+    st.plotly_chart(fig_raw, width="stretch")
 else:
     st.info("No expected temperature columns found to plot raw input.")
 
@@ -633,7 +633,7 @@ if "filtered" in st.session_state:
                  xy=(0.01, 0.84), xycoords="axes fraction",
                  color="#ff7f0e", fontsize=10)
     fig1.tight_layout()
-    st.pyplot(fig1, use_container_width=True)
+    st.pyplot(fig1, width="stretch")
 
     st.markdown("#### Observed vs modelled temperature")
 
@@ -672,17 +672,17 @@ if "filtered" in st.session_state:
             ax.set_ylabel("Modelled Temp (C)")
             ax.legend(frameon=False, fontsize=9)
         fig2.tight_layout()
-        st.pyplot(fig2, use_container_width=True)
+        st.pyplot(fig2, width="stretch")
 
     with st.expander("Daily summary statistics"):
         tab1, tab2 = st.tabs(["EKF", "RTS"])
         with tab1:
-            st.dataframe(ekf_stats.round(4), use_container_width=True)
+            st.dataframe(ekf_stats.round(4), width="stretch")
         with tab2:
-            st.dataframe(rts_stats.round(4), use_container_width=True)
+            st.dataframe(rts_stats.round(4), width="stretch")
 
     with st.expander("Full results table"):
-        st.dataframe(filtered.round(4), use_container_width=True)
+        st.dataframe(filtered.round(4), width="stretch")
 
     st.markdown("---")
     st.subheader("6 - Download")
