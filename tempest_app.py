@@ -7,7 +7,7 @@ Usage:
     streamlit run tempest_app.py
 
 Inputs:
-    1. Parameter CSV  -- same format as Input_Example_Tempest_MB.csv, or
+    1. Parameter CSV  -- same format as Input_Example_Tempest.csv, or
        enter the parameter values directly in the app
     2. VTP data CSV   -- same format as IB1_FV01.csv
 """
@@ -123,17 +123,51 @@ def safe_float(val, default=None):
         return default
 
 
+def _find_col(df, needles):
+    for col in df.columns:
+        low = str(col).strip().lower()
+        for needle in needles:
+            if needle in low:
+                return col
+    return None
+
+
+def _pick_value(row, col, fallback_idxs):
+    if col is not None:
+        return row[col]
+    for idx in fallback_idxs:
+        if idx < len(row):
+            val = row.iloc[idx]
+            if str(val).strip().lower() not in ("", "nan", "none"):
+                return val
+    return None
+
+
 def parse_param_csv(df):
     row = df.iloc[0]
+
+    station_col = _find_col(df, ["station id"])
+    tbc_col = _find_col(df, ["upper boundary", "first data point"])
+    bbc_col = _find_col(df, ["lower boundary", "bottom data point"])
+    obsd_col = _find_col(df, ["observed depth"])
+    kt_col = _find_col(df, ["kt is", "thermal conductivity"])
+    cwater_col = _find_col(df, ["cwater"])
+    csat_col = _find_col(df, ["csat"])
+    vq_col = _find_col(df, ["process variance", "vq_mday2"])
+
     params = {}
-    params["station_str"] = str(row.iloc[1]).strip()
-    params["tBC"]         = safe_float(row.iloc[3])
-    params["bBC"]         = safe_float(row.iloc[4])
-    params["obsD"]        = safe_float(row.iloc[5])
-    params["Kt"]          = safe_float(row.iloc[6], 2.9288)
-    params["Cwater"]      = safe_float(row.iloc[7], 4.18e6)
-    params["Csat"]        = safe_float(row.iloc[10])
-    vq_raw = row.iloc[11]
+    station_raw = _pick_value(row, station_col, [0, 1])
+    if station_raw is not None and (":" in str(station_raw) or "\\" in str(station_raw)):
+        station_raw = _pick_value(row, station_col, [1, 0])
+
+    params["station_str"] = str(station_raw).strip() if station_raw is not None else ""
+    params["tBC"]         = safe_float(_pick_value(row, tbc_col, [1, 3]))
+    params["bBC"]         = safe_float(_pick_value(row, bbc_col, [2, 4]))
+    params["obsD"]        = safe_float(_pick_value(row, obsd_col, [3, 5]))
+    params["Kt"]          = safe_float(_pick_value(row, kt_col, [4, 6]), 2.9288)
+    params["Cwater"]      = safe_float(_pick_value(row, cwater_col, [5, 7]), 4.18e6)
+    params["Csat"]        = safe_float(_pick_value(row, csat_col, [7, 10]), 3.5e6)
+    vq_raw = _pick_value(row, vq_col, [8, 11])
     params["vq_mday2"] = (
         None
         if str(vq_raw).strip().lower() in ("none", "nan", "")
@@ -278,11 +312,17 @@ def run_model(vtp_df, station_str, tBC, bBC, obs_depths,
 #  UI
 # ==============================================================================
 
-st.title("Tempest 1D -- Vertical Saturated Flux Estimator")
-st.caption(
-    "Vertical Temperature Profile (VTP) method  |  "
-    "Extended Kalman Filter + Rauch-Tung-Striebel Smoother"
-)
+header_col1, header_col2 = st.columns([6, 1])
+with header_col1:
+    st.title("Tempest 1D -- Vertical Saturated Flux Estimator")
+    st.caption(
+        "Vertical Temperature Profile (VTP) method  |  "
+        "Extended Kalman Filter + Rauch-Tung-Striebel Smoother"
+    )
+with header_col2:
+    logo_path = Path(__file__).parent / "magic.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=120)
 st.markdown("---")
 
 param_mode = st.radio(
@@ -292,7 +332,7 @@ param_mode = st.radio(
 )
 
 st.markdown("#### Example input files")
-example_param_path = Path(__file__).parent / "Input_Example_Tempest_MB.csv"
+example_param_path = Path(__file__).parent / "Input_Example_Tempest.csv"
 example_data_path = Path(__file__).parent / "IB1_FV01.csv"
 dl_col1, dl_col2 = st.columns(2)
 with dl_col1:
@@ -300,7 +340,7 @@ with dl_col1:
         st.download_button(
             label="Download example parameter CSV",
             data=example_param_path.read_bytes(),
-            file_name="Input_Example_Tempest_MB.csv",
+            file_name="Input_Example_Tempest.csv",
             mime="text/csv",
         )
     else:
@@ -321,7 +361,7 @@ col_up1, col_up2 = st.columns(2)
 with col_up1:
     st.subheader("1 - Parameter file")
     st.markdown(
-        "Upload a CSV matching **`Input_Example_Tempest_MB.csv`**  \n"
+        "Upload a CSV matching **`Input_Example_Tempest.csv`**  \n"
         "*(station ID, depths, thermal properties, process variance)*"
     )
     if param_mode == "Upload parameter CSV":
@@ -420,6 +460,7 @@ with st.expander("Edit parameters", expanded=True):
             "Cwater (J/m3/C)",
             value=float(params["Cwater"]) if params["Cwater"] is not None else 4.18e6,
             min_value=0.0, format="%.4e",
+             help="Heat capacity of water, is salinity dependent, currently static in modelled flux", #TODO incorporate into calculations, as currently static
         )
         Csat = st.number_input(
             "Csat (J/m3/C)",
