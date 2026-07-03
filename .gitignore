@@ -10,3 +10,18 @@ __pycache__/
 output/
 dist/
 build/
+
+# Notebook/research artifacts not required for app deployment
+*.ipynb
+Tempest_workflow_MBtry
+Moab_C-final-010926_OG
+
+# Local scripts and environment helpers
+_copilot_miniforge_test.cmd
+run_tempest.bat
+
+# Generated analysis outputs not required by deployed app
+figures/
+Moab_C_Results.csv
+Moab_stake_C_filtered_river.csv
+IB05_obs_class.csv

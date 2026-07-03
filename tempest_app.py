@@ -23,6 +23,7 @@ _REQUIREMENTS_FILE = Path(__file__).parent / "requirements_tempest_app.txt"
 
 _IMPORT_NAMES = {
     "filterpy":   "filterpy",
+    "plotly":     "plotly",
     "streamlit":  "streamlit",
     "pandas":     "pandas",
     "numpy":      "numpy",
@@ -97,6 +98,7 @@ if _check_and_install():
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import io
@@ -289,6 +291,31 @@ param_mode = st.radio(
     horizontal=True,
 )
 
+st.markdown("#### Example input files")
+example_param_path = Path(__file__).parent / "Input_Example_Tempest_MB.csv"
+example_data_path = Path(__file__).parent / "IB1_FV01.csv"
+dl_col1, dl_col2 = st.columns(2)
+with dl_col1:
+    if example_param_path.exists():
+        st.download_button(
+            label="Download example parameter CSV",
+            data=example_param_path.read_bytes(),
+            file_name="Input_Example_Tempest_MB.csv",
+            mime="text/csv",
+        )
+    else:
+        st.caption("Example parameter file not found in app directory.")
+with dl_col2:
+    if example_data_path.exists():
+        st.download_button(
+            label="Download example VTP data CSV",
+            data=example_data_path.read_bytes(),
+            file_name="IB1_FV01.csv",
+            mime="text/csv",
+        )
+    else:
+        st.caption("Example VTP data file not found in app directory.")
+
 col_up1, col_up2 = st.columns(2)
 
 with col_up1:
@@ -462,6 +489,31 @@ if missing_cols:
         "Expected column(s) not found: " + str(missing_cols)
         + "  \nAvailable: " + str(list(vtp_df.columns))
     )
+
+st.markdown("#### Raw input temperature time series")
+plot_cols = [c for c in [topStr, botStr] + midStr if c in vtp_df.columns]
+if plot_cols:
+    fig_raw = go.Figure()
+    for col in plot_cols:
+        fig_raw.add_trace(
+            go.Scatter(
+                x=vtp_df["timestamp"],
+                y=vtp_df[col],
+                mode="lines",
+                name=col,
+                line={"width": 1.4},
+            )
+        )
+    fig_raw.update_layout(
+        height=360,
+        xaxis_title="Time",
+        yaxis_title="Temperature (C)",
+        legend_title="Sensor",
+        margin={"l": 20, "r": 20, "t": 20, "b": 20},
+    )
+    st.plotly_chart(fig_raw, use_container_width=True)
+else:
+    st.info("No expected temperature columns found to plot raw input.")
 
 st.markdown("---")
 st.subheader("4 - Run model")
