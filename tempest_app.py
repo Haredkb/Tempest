@@ -12,6 +12,8 @@ Inputs:
     2. VTP data CSV   -- same format as IB1_FV01.csv
 """
 
+#TODO: add an export summary of run button with all the input parameters and the average summary statistic of the run including site name and the date/time of runtime
+
 # -- Auto-install missing packages from requirements_tempest_app.txt ----------
 import importlib
 import subprocess
@@ -99,8 +101,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+from plotly.subplots import make_subplots
 import io
 import re
 
@@ -245,21 +246,69 @@ def resolve_column_names(df, station_str, tBC, bBC, obs_depths):
     return top, bot, mid, missing
 
 
+def _extract_depth_from_col(col_name, station_str):
+    col = str(col_name).strip()
+    base = str(station_str or "").strip()
+    if base:
+        candidates = [base]
+        if base.endswith("_"):
+            candidates.append(base[:-1])
+        else:
+            candidates.append(base + "_")
+        for pref in _unique_keep_order(candidates):
+            if pref and col.startswith(pref):
+                col = col[len(pref):]
+                break
+
+    match = re.search(r"(\d+)\s*(mm|cm)$", col, flags=re.IGNORECASE)
+    if not match:
+        return None
+    val = float(match.group(1))
+    unit = match.group(2).lower()
+    return val / 1000.0 if unit == "mm" else val / 100.0
+
+
+def infer_depths_from_vtp_columns(vtp_df, station_str):
+    depths = []
+    for col in vtp_df.columns:
+        depth = _extract_depth_from_col(col, station_str)
+        if depth is not None:
+            depths.append(depth)
+    depths = sorted(set(depths))
+    if len(depths) < 2:
+        return None
+    return depths
+
+
 def parse_raw_vtp_csv(file_obj, source_name="raw_vtp"):
     raw_text = file_obj.getvalue().decode("utf-8", errors="ignore")
     lines = raw_text.splitlines()
 
-    sensor_depths_mm = []
-    sensor_re = re.compile(r"Sensor\s*#\d+:\s*Pos:\s*(\d+)\s*(mm)?", re.IGNORECASE)
+    sensor_depth_entries = []
+    sensor_re = re.compile(r"Sensor\s*#(\d+):\s*Pos:\s*(\d+)\s*(mm)?", re.IGNORECASE)
     for line in lines:
         match = sensor_re.search(line)
         if match:
-            sensor_depths_mm.append(int(match.group(1)))
+            sensor_depth_entries.append((int(match.group(1)), int(match.group(2))))
 
-    if not sensor_depths_mm:
+    if not sensor_depth_entries:
         raise ValueError(
             "No sensor depth metadata found (expected lines like 'Sensor #2: Pos: 50mm')."
         )
+
+    sensor_depth_entries = sorted(sensor_depth_entries, key=lambda x: x[0])
+    spacing_mm = [entry[1] for entry in sensor_depth_entries]
+
+    # Raw Alphamach metadata provides spacing between consecutive sensors.
+    # Convert to cumulative depths referenced to sensor #1 at 0 mm.
+    sensor_depths_mm = []
+    cumulative_depth = 0
+    for idx, gap in enumerate(spacing_mm):
+        if idx == 0:
+            cumulative_depth = 0
+        else:
+            cumulative_depth += gap
+        sensor_depths_mm.append(cumulative_depth)
 
     # Alphamach exports place data records after the metadata/header block.
     data_lines = lines[30:] if len(lines) > 30 else lines
@@ -293,6 +342,46 @@ def parse_raw_vtp_csv(file_obj, source_name="raw_vtp"):
 
     sensor_depths_m = [d / 1000.0 for d in sensor_depths_mm]
     return out, station_str, sensor_depths_m
+
+
+def _depth_tag(depth_m):
+    return str(int(round(depth_m * 100))) + "cm"
+
+
+def build_run_summary_row(filtered, vtp_df, station_str, tBC, bBC, obs_depths,
+                          Kt, Cwater, Csat, vq_used, T_noise_std, n_depths,
+                          data_mode, run_timestamp):
+    summary = {
+        "run_timestamp": pd.Timestamp(run_timestamp).isoformat(),
+        "station_str": station_str,
+        "data_mode": data_mode,
+        "top_boundary_m": float(tBC),
+        "bottom_boundary_m": float(bBC),
+        "obs_depths_m": ",".join([str(float(d)) for d in obs_depths]),
+        "Kt_W_m_C": float(Kt),
+        "Cwater_J_m3_C": float(Cwater),
+        "Csat_J_m3_C": float(Csat),
+        "vq_used_m_day2": float(vq_used * 60.0 * 60.0 * 24.0 * 60.0 * 60.0 * 24.0),
+        "T_noise_std_C": float(T_noise_std),
+        "n_depths": int(n_depths),
+        "n_timesteps": int(len(filtered)),
+        "avg_ekf_flux_m_day": float(filtered["ekf_q"].mean()),
+        "avg_rts_flux_m_day": float(filtered["rts_q"].mean()),
+    }
+
+    top_col, bot_col, obs_cols, _ = resolve_column_names(vtp_df, station_str, tBC, bBC, obs_depths)
+    sensor_cols = [c for c in [top_col, bot_col] + obs_cols if c is not None and c in vtp_df.columns]
+    sensor_cols = list(dict.fromkeys(sensor_cols))
+    for col in sensor_cols:
+        summary["avg_temp_" + col] = float(pd.to_numeric(vtp_df[col], errors="coerce").mean())
+
+    for depth in obs_depths:
+        tag = _depth_tag(depth)
+        obs_col = "obs_T_" + tag
+        if obs_col in filtered.columns:
+            summary["avg_sensor_temp_" + tag] = float(pd.to_numeric(filtered[obs_col], errors="coerce").mean())
+
+    return pd.DataFrame([summary])
 
 
 def run_model(vtp_df, station_str, tBC, bBC, obs_depths,
@@ -394,7 +483,7 @@ def run_model(vtp_df, station_str, tBC, bBC, obs_depths,
             "pcov_md2":   vq * spd * spd,
         })
         for i, depth in enumerate(obs_depths):
-            tag = str(int(round(depth * 100))) + "cm"
+            tag = _depth_tag(depth)
             base["obs_T_"     + tag] = meas[i]
             base["ekf_T_res_" + tag] = y_ekf[:, i]
             base["rts_T_res_" + tag] = y_rts[:, i]
@@ -536,12 +625,14 @@ if vtp_df is None:
     st.error("VTP data file could not be loaded.")
     st.stop()
 
+auto_depths_m = None
 if data_mode == "Upload raw Alphamach VTP CSV" and raw_station_str is not None:
     params["station_str"] = raw_station_str
     if raw_depths_m:
-        params["tBC"] = min(raw_depths_m)
-        params["bBC"] = max(raw_depths_m)
-        middle_depths = [d for d in raw_depths_m if min(raw_depths_m) < d < max(raw_depths_m)]
+        auto_depths_m = sorted(raw_depths_m)
+        params["tBC"] = min(auto_depths_m)
+        params["bBC"] = max(auto_depths_m)
+        middle_depths = [d for d in auto_depths_m if min(auto_depths_m) < d < max(auto_depths_m)]
         if middle_depths:
             params["obsD"] = middle_depths[0]
 
@@ -562,6 +653,26 @@ if data_mode == "Upload raw Alphamach VTP CSV" and raw_station_str is not None:
             help="Save parsed raw VTP data in processed format for future uploads.",
         )
 
+if auto_depths_m is None:
+    inferred_depths = infer_depths_from_vtp_columns(vtp_df, params.get("station_str", ""))
+    if inferred_depths:
+        auto_depths_m = inferred_depths
+        params["tBC"] = min(auto_depths_m)
+        params["bBC"] = max(auto_depths_m)
+        middle_depths = [d for d in auto_depths_m if min(auto_depths_m) < d < max(auto_depths_m)]
+        if middle_depths:
+            params["obsD"] = middle_depths[0]
+
+auto_tbc_default = params["tBC"]
+auto_bbc_default = params["bBC"]
+auto_obsD_str = str(params["obsD"]) if params["obsD"] is not None else ""
+if auto_depths_m:
+    auto_tbc_default = min(auto_depths_m)
+    auto_bbc_default = max(auto_depths_m)
+    middle_depths = [d for d in auto_depths_m if auto_tbc_default < d < auto_bbc_default]
+    if middle_depths:
+        auto_obsD_str = ", ".join([str(d) for d in middle_depths])
+
 st.markdown("---")
 st.subheader("3 - Review parameters")
 st.caption("Values parsed from your parameter file -- adjust as needed before running.")
@@ -578,21 +689,17 @@ with st.expander("Edit parameters", expanded=True):
         )
         tBC = st.number_input(
             "Top boundary depth (m)",
-            value=float(params["tBC"]) if params["tBC"] is not None else 0.01,
+            value=float(auto_tbc_default) if auto_tbc_default is not None else 0.01,
             min_value=0.0, max_value=10.0, step=0.01, format="%.3f",
         )
         bBC = st.number_input(
             "Bottom boundary depth (m)",
-            value=float(params["bBC"]) if params["bBC"] is not None else 0.11,
+            value=float(auto_bbc_default) if auto_bbc_default is not None else 0.11,
             min_value=0.0, max_value=10.0, step=0.01, format="%.3f",
-        )
-        obsD_default = (
-            params["obsD"] if params["obsD"] is not None
-            else round((tBC + bBC) / 2, 3)
         )
         obsD_str = st.text_input(
             "Observation depth(s) (m), comma-separated",
-            value=str(obsD_default),
+            value=auto_obsD_str if auto_obsD_str else str(round((tBC + bBC) / 2, 3)),
         )
 
     with col2:
@@ -715,6 +822,7 @@ run_btn = st.button(
 if run_btn:
     with st.spinner("Running Extended Kalman Filter and RTS Smoother..."):
         try:
+            run_timestamp = pd.Timestamp.now()
             filtered, vq_used, spd = run_model(
                 vtp_df=vtp_df,
                 station_str=station_str,
@@ -730,6 +838,23 @@ if run_btn:
             st.session_state["spd"]         = spd
             st.session_state["obs_depths"]  = obs_depths
             st.session_state["station_str"] = station_str
+            st.session_state["run_timestamp"] = run_timestamp
+            st.session_state["summary_row"] = build_run_summary_row(
+                filtered=filtered,
+                vtp_df=vtp_df,
+                station_str=station_str,
+                tBC=tBC,
+                bBC=bBC,
+                obs_depths=obs_depths,
+                Kt=Kt,
+                Cwater=Cwater,
+                Csat=Csat,
+                vq_used=vq_used,
+                T_noise_std=T_noise_std,
+                n_depths=n_depths,
+                data_mode=data_mode,
+                run_timestamp=run_timestamp,
+            )
         except Exception as exc:
             st.error("Model run failed: " + str(exc))
             import traceback
@@ -742,6 +867,8 @@ if "filtered" in st.session_state:
     spd         = st.session_state["spd"]
     obs_depths  = st.session_state["obs_depths"]
     station_str = st.session_state["station_str"]
+    run_timestamp = st.session_state.get("run_timestamp", pd.Timestamp.now())
+    summary_row = st.session_state.get("summary_row")
     n_meas      = len(obs_depths)
 
     st.success("Model run complete.")
@@ -759,67 +886,137 @@ if "filtered" in st.session_state:
     m2.metric("RTS median daily mean", "{:.4f} m/day".format(np.median(rts_stats["mean"])))
     m3.metric("Process variance vq",   "{:.3e} m/day^2".format(vq_used * spd * spd))
     m4.metric("Valid timesteps",       "{:,}".format(len(filtered)))
+    st.caption("Run time: " + str(pd.Timestamp(run_timestamp).strftime("%Y-%m-%d %H:%M:%S")))
 
     st.markdown("#### Estimated vertical specific discharge")
-    fig1, ax1 = plt.subplots(figsize=(14, 4))
-    ax1.plot(filtered_plot["datetime"], filtered_plot["ekf_q"],
-             linewidth=1.5, color="#1f77b4", label="EKF", zorder=3)
-    ax1.plot(filtered_plot["datetime"], filtered_plot["rts_q"],
-             linewidth=1.5, color="#ff7f0e", label="RTS", linestyle="--", zorder=3)
-    ax1.axhline(0, color="k", linewidth=0.7, linestyle=":", alpha=0.5)
-    ax1.set_ylabel("Specific Discharge (m/day)", fontsize=12)
-    ax1.tick_params(axis="x", rotation=45, labelsize=10)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
-    ax1.legend(frameon=False, fontsize=11)
-    ekf_med = np.median(ekf_stats["mean"])
-    rts_med = np.median(rts_stats["mean"])
-    ax1.annotate("EKF mean: {:.3f} m/day".format(ekf_med),
-                 xy=(0.01, 0.93), xycoords="axes fraction",
-                 color="#1f77b4", fontsize=10)
-    ax1.annotate("RTS mean: {:.3f} m/day".format(rts_med),
-                 xy=(0.01, 0.84), xycoords="axes fraction",
-                 color="#ff7f0e", fontsize=10)
-    fig1.tight_layout()
-    st.pyplot(fig1, width="stretch")
+    fig1 = go.Figure()
+    fig1.add_trace(
+        go.Scatter(
+            x=filtered_plot["datetime"],
+            y=filtered_plot["ekf_q"],
+            mode="lines",
+            name="EKF",
+            line={"width": 2, "color": "#1f77b4"},
+        )
+    )
+    fig1.add_trace(
+        go.Scatter(
+            x=filtered_plot["datetime"],
+            y=filtered_plot["rts_q"],
+            mode="lines",
+            name="RTS",
+            line={"width": 2, "color": "#ff7f0e", "dash": "dash"},
+        )
+    )
+    fig1.add_hline(y=0.0, line_width=1, line_dash="dot", line_color="rgba(0,0,0,0.5)")
+    fig1.update_layout(
+        height=380,
+        xaxis_title="Time",
+        yaxis_title="Specific Discharge (m/day)",
+        margin={"l": 20, "r": 20, "t": 20, "b": 20},
+        legend={"title": "Series"},
+    )
+    st.plotly_chart(fig1, width="stretch")
 
     st.markdown("#### Observed vs modelled temperature")
 
     if n_meas == 1:
-        fig2, ax2 = plt.subplots(figsize=(6, 6))
-        ax2.scatter(filtered_plot["obs_T"], filtered_plot["ekf_T"],
-                    color="#1f77b4", alpha=0.4, s=15, edgecolors="none", label="EKF")
-        ax2.scatter(filtered_plot["obs_T"], filtered_plot["rts_T"],
-                    color="#ff7f0e", alpha=0.4, s=15, edgecolors="none", label="RTS")
+        fig2 = go.Figure()
+        fig2.add_trace(
+            go.Scatter(
+                x=filtered_plot["obs_T"],
+                y=filtered_plot["ekf_T"],
+                mode="markers",
+                name="EKF",
+                marker={"size": 6, "opacity": 0.5, "color": "#1f77b4"},
+            )
+        )
+        fig2.add_trace(
+            go.Scatter(
+                x=filtered_plot["obs_T"],
+                y=filtered_plot["rts_T"],
+                mode="markers",
+                name="RTS",
+                marker={"size": 6, "opacity": 0.5, "color": "#ff7f0e"},
+            )
+        )
         lo = min(filtered_plot[["obs_T", "ekf_T", "rts_T"]].min())
         hi = max(filtered_plot[["obs_T", "ekf_T", "rts_T"]].max())
-        ax2.plot([lo, hi], [lo, hi], "k--", linewidth=1.5, label="1:1")
-        ax2.set_xlabel("Observed Temp (C)", fontsize=12)
-        ax2.set_ylabel("Modelled Temp (C)", fontsize=12)
-        ax2.legend(frameon=False, fontsize=11)
-        fig2.tight_layout()
-        col_sc, _ = st.columns([1, 1])
-        col_sc.pyplot(fig2)
+        fig2.add_trace(
+            go.Scatter(
+                x=[lo, hi],
+                y=[lo, hi],
+                mode="lines",
+                name="1:1",
+                line={"dash": "dash", "color": "black", "width": 1.5},
+            )
+        )
+        fig2.update_layout(
+            height=520,
+            xaxis_title="Observed Temp (C)",
+            yaxis_title="Modelled Temp (C)",
+            margin={"l": 20, "r": 20, "t": 20, "b": 20},
+        )
+        st.plotly_chart(fig2, width="stretch")
     else:
-        fig2, axes = plt.subplots(1, n_meas, figsize=(5 * n_meas, 5), squeeze=False)
+        fig2 = make_subplots(
+            rows=1,
+            cols=n_meas,
+            subplot_titles=["Depth: " + _depth_tag(d) for d in obs_depths],
+            horizontal_spacing=0.06,
+        )
         for i, depth in enumerate(obs_depths):
-            tag     = str(int(round(depth * 100))) + "cm"
-            ax      = axes[0][i]
+            tag     = _depth_tag(depth)
             obs_col = filtered_plot["obs_T_" + tag]
             et_col  = filtered_plot["ekf_T_" + tag]
             rt_col  = filtered_plot["rts_T_" + tag]
-            ax.scatter(obs_col, et_col, color="#1f77b4", alpha=0.4,
-                       s=12, edgecolors="none", label="EKF")
-            ax.scatter(obs_col, rt_col, color="#ff7f0e", alpha=0.4,
-                       s=12, edgecolors="none", label="RTS")
+            show_legend = (i == 0)
+            fig2.add_trace(
+                go.Scatter(
+                    x=obs_col,
+                    y=et_col,
+                    mode="markers",
+                    name="EKF",
+                    marker={"size": 6, "opacity": 0.5, "color": "#1f77b4"},
+                    showlegend=show_legend,
+                ),
+                row=1,
+                col=i + 1,
+            )
+            fig2.add_trace(
+                go.Scatter(
+                    x=obs_col,
+                    y=rt_col,
+                    mode="markers",
+                    name="RTS",
+                    marker={"size": 6, "opacity": 0.5, "color": "#ff7f0e"},
+                    showlegend=show_legend,
+                ),
+                row=1,
+                col=i + 1,
+            )
             lo = min(obs_col.min(), et_col.min(), rt_col.min())
             hi = max(obs_col.max(), et_col.max(), rt_col.max())
-            ax.plot([lo, hi], [lo, hi], "k--", linewidth=1.2)
-            ax.set_title("Depth: " + tag, fontsize=11)
-            ax.set_xlabel("Observed Temp (C)")
-            ax.set_ylabel("Modelled Temp (C)")
-            ax.legend(frameon=False, fontsize=9)
-        fig2.tight_layout()
-        st.pyplot(fig2, width="stretch")
+            fig2.add_trace(
+                go.Scatter(
+                    x=[lo, hi],
+                    y=[lo, hi],
+                    mode="lines",
+                    name="1:1",
+                    line={"dash": "dash", "color": "black", "width": 1.2},
+                    showlegend=False,
+                ),
+                row=1,
+                col=i + 1,
+            )
+            fig2.update_xaxes(title_text="Observed Temp (C)", row=1, col=i + 1)
+            fig2.update_yaxes(title_text="Modelled Temp (C)", row=1, col=i + 1)
+
+        fig2.update_layout(
+            height=520,
+            margin={"l": 20, "r": 20, "t": 50, "b": 20},
+        )
+        st.plotly_chart(fig2, width="stretch")
 
     with st.expander("Daily summary statistics"):
         tab1, tab2 = st.tabs(["EKF", "RTS"])
@@ -830,6 +1027,10 @@ if "filtered" in st.session_state:
 
     with st.expander("Full results table"):
         st.dataframe(filtered.round(4), width="stretch")
+
+    if summary_row is not None:
+        with st.expander("Run summary (single row)", expanded=True):
+            st.dataframe(summary_row, width="stretch")
 
     st.markdown("---")
     st.subheader("6 - Download")
@@ -845,12 +1046,28 @@ if "filtered" in st.session_state:
         mime="text/csv",
     )
 
-    buf = io.BytesIO()
-    fig1.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    buf.seek(0)
     st.download_button(
-        label="Download discharge plot (PNG)",
-        data=buf,
-        file_name=fname_stem + "_discharge.png",
-        mime="image/png",
+        label="Download run summary CSV",
+        data=(summary_row.to_csv(index=False).encode("utf-8") if summary_row is not None else b""),
+        file_name=fname_stem + "_run_summary.csv",
+        mime="text/csv",
+        disabled=(summary_row is None),
+    )
+
+    fig1_html = io.StringIO()
+    fig1.write_html(fig1_html, include_plotlyjs="cdn")
+    st.download_button(
+        label="Download discharge plot (HTML)",
+        data=fig1_html.getvalue().encode("utf-8"),
+        file_name=fname_stem + "_discharge_plot.html",
+        mime="text/html",
+    )
+
+    fig2_html = io.StringIO()
+    fig2.write_html(fig2_html, include_plotlyjs="cdn")
+    st.download_button(
+        label="Download observed-vs-modelled plot (HTML)",
+        data=fig2_html.getvalue().encode("utf-8"),
+        file_name=fname_stem + "_obs_vs_model_plot.html",
+        mime="text/html",
     )
