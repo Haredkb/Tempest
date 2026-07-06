@@ -102,6 +102,7 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import io
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tempest1d import EKF, ModelProperties, run_EKF, run_RTS
@@ -189,20 +190,119 @@ def default_params():
     }
 
 
-def build_column_names(station_str, tBC, bBC, obs_depths):
-    top = station_str + str(int(round(tBC * 100))) + "cm"
-    bot = station_str + str(int(round(bBC * 100))) + "cm"
-    mid = [station_str + str(int(round(d * 100))) + "cm" for d in obs_depths]
-    return top, bot, mid
+def _unique_keep_order(values):
+    out = []
+    seen = set()
+    for val in values:
+        if val and val not in seen:
+            out.append(val)
+            seen.add(val)
+    return out
+
+
+def _build_depth_candidates(station_str, depth_m):
+    depth_cm = str(int(round(depth_m * 100))) + "cm"
+    depth_mm = str(int(round(depth_m * 1000))) + "mm"
+
+    base = str(station_str or "").strip()
+    if not base:
+        prefixes = [""]
+    else:
+        prefixes = [base]
+        if base.endswith("_"):
+            prefixes.append(base[:-1])
+        else:
+            prefixes.append(base + "_")
+
+    candidates = []
+    for pref in _unique_keep_order(prefixes):
+        candidates.append(pref + depth_cm)
+        candidates.append(pref + depth_mm)
+    return _unique_keep_order(candidates)
+
+
+def _resolve_depth_column(df, station_str, depth_m):
+    candidates = _build_depth_candidates(station_str, depth_m)
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def resolve_column_names(df, station_str, tBC, bBC, obs_depths):
+    top = _resolve_depth_column(df, station_str, tBC)
+    bot = _resolve_depth_column(df, station_str, bBC)
+    mid = [_resolve_depth_column(df, station_str, d) for d in obs_depths]
+
+    missing = []
+    if top is None:
+        missing.append(_build_depth_candidates(station_str, tBC)[0])
+    if bot is None:
+        missing.append(_build_depth_candidates(station_str, bBC)[0])
+    for d, col in zip(obs_depths, mid):
+        if col is None:
+            missing.append(_build_depth_candidates(station_str, d)[0])
+    return top, bot, mid, missing
+
+
+def parse_raw_vtp_csv(file_obj, source_name="raw_vtp"):
+    raw_text = file_obj.getvalue().decode("utf-8", errors="ignore")
+    lines = raw_text.splitlines()
+
+    sensor_depths_mm = []
+    sensor_re = re.compile(r"Sensor\s*#\d+:\s*Pos:\s*(\d+)\s*(mm)?", re.IGNORECASE)
+    for line in lines:
+        match = sensor_re.search(line)
+        if match:
+            sensor_depths_mm.append(int(match.group(1)))
+
+    if not sensor_depths_mm:
+        raise ValueError(
+            "No sensor depth metadata found (expected lines like 'Sensor #2: Pos: 50mm')."
+        )
+
+    # Alphamach exports place data records after the metadata/header block.
+    data_lines = lines[30:] if len(lines) > 30 else lines
+    records = []
+    expected_len = 1 + len(sensor_depths_mm)
+
+    for raw_line in data_lines:
+        txt = raw_line.strip().strip('"')
+        if not txt or "/" not in txt or ":" not in txt:
+            continue
+
+        parts = [p.strip() for p in txt.split("\t") if p.strip()]
+        if len(parts) < expected_len:
+            continue
+
+        ts = pd.to_datetime(parts[0], dayfirst=True, errors="coerce")
+        if pd.isna(ts):
+            continue
+
+        vals = [pd.to_numeric(v, errors="coerce") for v in parts[1:expected_len]]
+        records.append([ts] + vals)
+
+    if not records:
+        raise ValueError("No valid temperature records were parsed from raw VTP file.")
+
+    station_base = Path(str(source_name)).stem
+    station_str = station_base + "_"
+    cols = [station_str + str(depth_mm) + "mm" for depth_mm in sensor_depths_mm]
+    out = pd.DataFrame(records, columns=["timestamp"] + cols)
+    out = out.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+
+    sensor_depths_m = [d / 1000.0 for d in sensor_depths_mm]
+    return out, station_str, sensor_depths_m
 
 
 def run_model(vtp_df, station_str, tBC, bBC, obs_depths,
               Kt, Cwater, Csat, vq_mday2, n_depths=41, T_noise_std=0.042):
     spd = 60.0 * 60.0 * 24.0
 
-    topStr, botStr, midStr = build_column_names(station_str, tBC, bBC, obs_depths)
+    topStr, botStr, midStr, missing_cols = resolve_column_names(
+        vtp_df, station_str, tBC, bBC, obs_depths
+    )
 
-    missing_cols = [c for c in [topStr, botStr] + midStr if c not in vtp_df.columns]
     if missing_cols:
         raise ValueError(
             "Column(s) not found in VTP data: " + str(missing_cols)
@@ -375,10 +475,21 @@ with col_up1:
 
 with col_up2:
     st.subheader("2 - VTP data file")
-    st.markdown(
-        "Upload a CSV matching **`IB1_FV01.csv`**  \n"
-        "*(timestamp column + temperature columns named STATIONID_Xcm)*"
+    data_mode = st.radio(
+        "VTP data upload mode",
+        ["Upload own processed VTP CSV", "Upload raw Alphamach VTP CSV"],
+        horizontal=True,
     )
+    if data_mode == "Upload own processed VTP CSV":
+        st.markdown(
+            "Upload a CSV matching **`IB1_FV01.csv`**  \n"
+            "*(timestamp column + temperature columns named STATIONID_Xcm or STATIONID_Xmm)*"
+        )
+    else:
+        st.markdown(
+            "Upload raw logger export (e.g., **`TX128_LDCA10.csv`**)  \n"
+            "*(metadata header + data block after line ~30; app will parse sensor depths automatically)*"
+        )
     data_file = st.file_uploader(
         "VTP data CSV", type="csv", key="data_upload",
         label_visibility="collapsed"
@@ -401,13 +512,22 @@ if param_mode == "Upload parameter CSV":
         st.stop()
 
 vtp_df = None
+raw_station_str = None
+raw_depths_m = None
 try:
-    vtp_df = pd.read_csv(data_file, parse_dates=["timestamp"])
+    if data_mode == "Upload raw Alphamach VTP CSV":
+        vtp_df, raw_station_str, raw_depths_m = parse_raw_vtp_csv(data_file, data_file.name)
+    else:
+        vtp_df = pd.read_csv(data_file, parse_dates=["timestamp"])
 except Exception:
     try:
-        data_file.seek(0)
-        vtp_df = pd.read_csv(data_file)
-        vtp_df["timestamp"] = pd.to_datetime(vtp_df["timestamp"])
+        if data_mode == "Upload raw Alphamach VTP CSV":
+            data_file.seek(0)
+            vtp_df, raw_station_str, raw_depths_m = parse_raw_vtp_csv(data_file, data_file.name)
+        else:
+            data_file.seek(0)
+            vtp_df = pd.read_csv(data_file)
+            vtp_df["timestamp"] = pd.to_datetime(vtp_df["timestamp"])
     except Exception as exc:
         st.error("Could not parse VTP data file: " + str(exc))
         st.stop()
@@ -415,6 +535,32 @@ except Exception:
 if vtp_df is None:
     st.error("VTP data file could not be loaded.")
     st.stop()
+
+if data_mode == "Upload raw Alphamach VTP CSV" and raw_station_str is not None:
+    params["station_str"] = raw_station_str
+    if raw_depths_m:
+        params["tBC"] = min(raw_depths_m)
+        params["bBC"] = max(raw_depths_m)
+        middle_depths = [d for d in raw_depths_m if min(raw_depths_m) < d < max(raw_depths_m)]
+        if middle_depths:
+            params["obsD"] = middle_depths[0]
+
+        st.info(
+            "Raw VTP parsed: detected station prefix '"
+            + raw_station_str
+            + "' with sensor depths "
+            + str([str(int(round(d * 1000))) + "mm" for d in raw_depths_m])
+            + "."
+        )
+
+        export_name = Path(str(data_file.name)).stem + "_processed_vtp.csv"
+        st.download_button(
+            label="Download parsed VTP CSV",
+            data=vtp_df.to_csv(index=False).encode("utf-8"),
+            file_name=export_name,
+            mime="text/csv",
+            help="Save parsed raw VTP data in processed format for future uploads.",
+        )
 
 st.markdown("---")
 st.subheader("3 - Review parameters")
@@ -523,8 +669,9 @@ with st.expander("Preview VTP data", expanded=False):
         )
     )
 
-topStr, botStr, midStr = build_column_names(station_str, tBC, bBC, obs_depths)
-missing_cols = [c for c in [topStr, botStr] + midStr if c not in vtp_df.columns]
+topStr, botStr, midStr, missing_cols = resolve_column_names(
+    vtp_df, station_str, tBC, bBC, obs_depths
+)
 if missing_cols:
     st.warning(
         "Expected column(s) not found: " + str(missing_cols)
